@@ -7,6 +7,8 @@ on a BBC micro:bit V2. Behaviors implement the official Elecfreaks cases:
 [Case 09 obstacle avoidance](https://learn-en.readthedocs.io/en/latest/microbitKit/smart_cutebot/cutebot_case09.html),
 Case 05 auto headlights.
 
+**New here?** Start with **[GETTING_STARTED.md](GETTING_STARTED.md)** — step-by-step setup, first drive, and troubleshooting for beginners.
+
 The robot is **fully autonomous on battery** — the Mac is an optional monitor /
 mode switcher over USB serial. All driving logic lives in the firmware
 (single source of truth, single motor authority).
