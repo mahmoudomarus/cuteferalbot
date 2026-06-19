@@ -45,7 +45,15 @@ class QtBot:
         return find_microbit_port() is not None
 
     def capabilities(self) -> dict[str, Any]:
-        """Static manifest the orchestrator can use for capability matching."""
+        """Static manifest the orchestrator can use for capability matching.
+
+        ``actions`` is the rich, self-describing surface: each entry carries
+        the metadata a generic orchestrator (e.g. FERAL's HUP layer) needs to
+        expose the command safely — category, permission tier, parameters,
+        and an optional closed-loop ``verify`` contract (read a telemetry
+        field back and confirm the intended effect). The flat ``commands`` /
+        ``sensors`` / ``events`` lists are kept for backward compatibility.
+        """
         nav_cmds = ["go_to", "patrol", "stop_navigation"] if self._navigator else []
         return {
             "device_type": self.DEVICE_TYPE,
@@ -58,6 +66,7 @@ class QtBot:
                         "pitch_mg", "battery", "pose"],
             "events": ["mode_changed", "state_changed", "obstacle",
                        "battery_changed"],
+            "actions": self._action_descriptors(),
             "navigation": {
                 "attached": self._navigator is not None,
                 "frame": "world (cm) when an ArUco world marker is visible, "
@@ -73,6 +82,153 @@ class QtBot:
                 "patrol": "cycle through waypoints; requires a pose source",
             },
         }
+
+    def _action_descriptors(self) -> list[dict[str, Any]]:
+        """Rich, generic-orchestrator-friendly descriptors for every command.
+
+        Mode names in ``verify.expect`` use this module's MODE_NAMES values
+        (what ``status()`` reports) plus the raw firmware flag, so a consumer
+        that reads either form still verifies correctly.
+        """
+        actions: list[dict[str, Any]] = [
+            {
+                "name": "follow_line",
+                "category": "actuator",
+                "permission_tier": "active",
+                "requires_confirmation": True,
+                "reversible": True,
+                "description": "Autonomous line follow (black line on a white surface).",
+                "params": [],
+                "verify": {"via": "read_telemetry", "field": "mode",
+                           "expect": ["line_follow", "T"]},
+                "safety_notes": "Ensure the track is clear; firmware handles "
+                                "obstacle and edge reflexes.",
+            },
+            {
+                "name": "explore",
+                "category": "actuator",
+                "permission_tier": "active",
+                "requires_confirmation": True,
+                "reversible": True,
+                "description": "Roam an open surface with edge + obstacle safety.",
+                "params": [],
+                "verify": {"via": "read_telemetry", "field": "mode",
+                           "expect": ["explore", "E"]},
+                "safety_notes": "Keep the surface clear of drops beyond firmware "
+                                "edge detection range.",
+            },
+            {
+                "name": "halt",
+                "category": "actuator",
+                "permission_tier": "passive",
+                "requires_confirmation": False,
+                "reversible": False,
+                "description": "Stop the motors immediately (emergency stop).",
+                "params": [],
+                "verify": {"via": "read_telemetry", "field": "mode",
+                           "expect": ["stopped", "M"]},
+                "safety_notes": "Always safe; the firmware honors this at any time.",
+            },
+            {
+                "name": "resume",
+                "category": "actuator",
+                "permission_tier": "active",
+                "requires_confirmation": True,
+                "reversible": True,
+                "description": "Release back to the last autonomous mode.",
+                "params": [],
+                "safety_notes": "Resumes motion; only use when the area is clear.",
+            },
+            {
+                "name": "drive",
+                "category": "actuator",
+                "permission_tier": "dangerous",
+                "requires_confirmation": True,
+                "reversible": True,
+                "description": "Direct wheel control. Firmware reverts to "
+                               "autonomous after 1.5s without a drive command.",
+                "params": [
+                    {"name": "left", "type": "integer", "required": True,
+                     "description": "Left wheel speed, -100..100."},
+                    {"name": "right", "type": "integer", "required": True,
+                     "description": "Right wheel speed, -100..100."},
+                ],
+                "safety_notes": "Moves the robot directly; confirm a clear path.",
+            },
+            {
+                "name": "set_lights",
+                "category": "actuator",
+                "permission_tier": "passive",
+                "requires_confirmation": False,
+                "reversible": True,
+                "description": "Set headlight + underglow RGB color (0-255) for "
+                               "expression or signaling. Lights only, no motion.",
+                "params": [
+                    {"name": "r", "type": "integer", "required": True,
+                     "description": "Red channel, 0-255."},
+                    {"name": "g", "type": "integer", "required": True,
+                     "description": "Green channel, 0-255."},
+                    {"name": "b", "type": "integer", "required": True,
+                     "description": "Blue channel, 0-255."},
+                ],
+                "safety_notes": "Lights only; safe on USB power.",
+            },
+            {
+                "name": "read_telemetry",
+                "category": "sensor",
+                "permission_tier": "passive",
+                "requires_confirmation": False,
+                "reversible": True,
+                "description": "Read the latest telemetry snapshot (mode, sonar, "
+                               "line sensors, battery, phase).",
+                "params": [],
+                "safety_notes": "Read-only; no side effects.",
+            },
+        ]
+        if self._navigator:
+            actions.extend([
+                {
+                    "name": "go_to",
+                    "category": "actuator",
+                    "permission_tier": "dangerous",
+                    "requires_confirmation": True,
+                    "reversible": True,
+                    "description": "Closed-loop drive to a world coordinate "
+                                   "(x_cm, y_cm). Requires an attached pose source.",
+                    "params": [
+                        {"name": "x_cm", "type": "number", "required": True,
+                         "description": "Target X in cm (world or camera frame)."},
+                        {"name": "y_cm", "type": "number", "required": True,
+                         "description": "Target Y in cm."},
+                    ],
+                    "safety_notes": "Robot navigates autonomously; clear the area.",
+                },
+                {
+                    "name": "patrol",
+                    "category": "actuator",
+                    "permission_tier": "dangerous",
+                    "requires_confirmation": True,
+                    "reversible": True,
+                    "description": "Cycle through a list of waypoints. Requires a "
+                                   "pose source.",
+                    "params": [
+                        {"name": "waypoints", "type": "array", "required": True,
+                         "description": "List of [x_cm, y_cm] pairs to visit."},
+                    ],
+                    "safety_notes": "Continuous autonomous motion until stopped.",
+                },
+                {
+                    "name": "stop_navigation",
+                    "category": "actuator",
+                    "permission_tier": "passive",
+                    "requires_confirmation": False,
+                    "reversible": False,
+                    "description": "Cancel any active go_to/patrol navigation.",
+                    "params": [],
+                    "safety_notes": "Always safe.",
+                },
+            ])
+        return actions
 
     # ---- commands (intent -> firmware mapping) -----------------------------
 
