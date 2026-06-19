@@ -23,18 +23,22 @@ LIGHT_OFF = (0, 0, 0)
 
 
 class AutoBrain:
-    # Sonar (Case 09): obstacle zone 2-20cm; readings <2cm are echo timeouts.
+    # Sonar (Case 09): readings <SONAR_MIN are echo timeouts (clear).
+    # TRACK uses proportional speed-scaling: full speed beyond SONAR_SLOW_AT,
+    # linear ramp down to 0 at SONAR_STOP_AT. TABLE keeps the close-range
+    # avoid_turn reflex at SONAR_OBSTACLE.
     SONAR_MIN = 2
+    SONAR_STOP_AT = 10
+    SONAR_SLOW_AT = 50
     SONAR_OBSTACLE = 20
 
-    # Case 08 line follow, smoothed: the official sample slams between 50/10
-    # which makes the car fishtail. Steering is graded instead — a gentle
-    # correction first, escalating to a sharp one only if the probe stays
-    # off-center longer than CORR_ESCALATE_MS (i.e. a real curve, not jitter).
+    # Case 08 line follow with proportional steering: the gain lerps
+    # continuously from MILD to SHARP over CORR_ESCALATE_MS, so curves get
+    # tighter the longer the probe stays off-center while jitter stays gentle.
     LINE_STRAIGHT = 30
-    CORR_MILD = (18, 38)      # (inner, outer) wheel speeds, slight drift
-    CORR_SHARP = (0, 45)      # sustained offset: real curve, turn hard
-    CORR_ESCALATE_MS = 140
+    CORR_MILD = (18, 38)      # (inner, outer) wheel speeds at first contact
+    CORR_SHARP = (0, 45)      # full gain on a sustained offset
+    CORR_ESCALATE_MS = 220
     LINE_SLOW = 12            # also used for the search creep
 
     TABLE_FORWARD = 30
@@ -107,6 +111,19 @@ class AutoBrain:
 
     def sonar_obstacle(self, sonar):
         return self.SONAR_MIN < sonar < self.SONAR_OBSTACLE
+
+    def speed_factor(self, sonar):
+        """0..100 multiplier from sonar: 100 = clear, 0 = stop. Linear ramp
+        between SONAR_STOP_AT and SONAR_SLOW_AT. Sub-MIN reads are echo
+        timeouts and treated as clear."""
+        if sonar < self.SONAR_MIN:
+            return 100
+        if sonar <= self.SONAR_STOP_AT:
+            return 0
+        if sonar >= self.SONAR_SLOW_AT:
+            return 100
+        span = self.SONAR_SLOW_AT - self.SONAR_STOP_AT
+        return int(100 * (sonar - self.SONAR_STOP_AT) / span)
 
     def tilt_edge(self, pitch):
         if not self.calibrated:
@@ -196,15 +213,18 @@ class AutoBrain:
             self._start_edge_recovery()
             return self._run_recovery()
 
-        if self.sonar_obstacle(sonar):
-            return 0, 0, self._blink(LIGHT_STOP)
+        factor = self.speed_factor(sonar)
 
-        # Line visible: follow it with graded steering and clear search.
+        # Line visible: follow it with proportional steering and clear search.
         if track == 11:
             self.phase = None
             self.search_stage = 0
             self.corr_side = 0
-            return self.LINE_STRAIGHT, self.LINE_STRAIGHT, LIGHT_ON_LINE
+            if factor == 0:
+                return 0, 0, self._blink(LIGHT_STOP)
+            s = self.LINE_STRAIGHT * factor // 100
+            return s, s, LIGHT_ON_LINE
+
         if track == 10 or track == 1:
             side = -1 if track == 10 else 1   # which way the line drifted
             self.turn_dir = side
@@ -213,10 +233,18 @@ class AutoBrain:
             if self.corr_side != side:
                 self.corr_side = side
                 self.corr_since = now
-            if now - self.corr_since < self.CORR_ESCALATE_MS:
-                inner, outer = self.CORR_MILD
-            else:
-                inner, outer = self.CORR_SHARP
+            elapsed = now - self.corr_since
+            if elapsed > self.CORR_ESCALATE_MS:
+                elapsed = self.CORR_ESCALATE_MS
+            # Linear lerp from MILD to SHARP across the escalation window.
+            mi, ma = self.CORR_MILD[0], self.CORR_SHARP[0]
+            inner = mi + (ma - mi) * elapsed // self.CORR_ESCALATE_MS
+            mi, ma = self.CORR_MILD[1], self.CORR_SHARP[1]
+            outer = mi + (ma - mi) * elapsed // self.CORR_ESCALATE_MS
+            inner = inner * factor // 100
+            outer = outer * factor // 100
+            if factor == 0:
+                return 0, 0, self._blink(LIGHT_STOP)
             if side < 0:   # line to the LEFT: slow left wheel, speed right
                 return inner, outer, LIGHT_CORRECT
             return outer, inner, LIGHT_CORRECT
@@ -275,4 +303,6 @@ class AutoBrain:
             self._enter("avoid_turn", random.randint(250, 600))
             return self._run_recovery()
 
-        return self.TABLE_FORWARD, self.TABLE_FORWARD, LIGHT_FORWARD
+        # Slow proportionally as obstacles approach (before avoid_turn fires).
+        speed = self.TABLE_FORWARD * self.speed_factor(sonar) // 100
+        return speed, speed, LIGHT_FORWARD

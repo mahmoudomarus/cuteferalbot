@@ -12,7 +12,7 @@ See DEVICE_API.md for the full contract.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Iterable
 
 from .serial_client import CutebotClient, Telemetry, find_microbit_port
 
@@ -36,6 +36,7 @@ class QtBot:
     def __init__(self, port: str | None = None):
         self._client = CutebotClient(port)
         self._last: Telemetry | None = None
+        self._navigator: Any = None    # set by attach_navigator
 
     # ---- discovery -------------------------------------------------------
 
@@ -45,22 +46,31 @@ class QtBot:
 
     def capabilities(self) -> dict[str, Any]:
         """Static manifest the orchestrator can use for capability matching."""
+        nav_cmds = ["go_to", "patrol", "stop_navigation"] if self._navigator else []
         return {
             "device_type": self.DEVICE_TYPE,
             "transport": {"kind": "usb_serial", "port": self._client.port},
             "commands": [
                 "follow_line", "explore", "halt", "resume",
                 "drive", "set_lights",
-            ],
+            ] + nav_cmds,
             "sensors": ["sonar_cm", "line_left", "line_right", "light",
-                        "pitch_mg", "battery"],
+                        "pitch_mg", "battery", "pose"],
             "events": ["mode_changed", "state_changed", "obstacle",
                        "battery_changed"],
+            "navigation": {
+                "attached": self._navigator is not None,
+                "frame": "world (cm) when an ArUco world marker is visible, "
+                         "else camera frame",
+            },
             "notes": {
                 "follow_line": "needs a black line on a white surface",
                 "explore": "open-surface roaming with edge + obstacle safety",
                 "drive": "direct wheel control; firmware reverts to autonomous "
                          "after 1.5s without drive commands",
+                "go_to": "closed-loop drive to (x_cm, y_cm); requires a pose "
+                         "source attached via attach_navigator()",
+                "patrol": "cycle through waypoints; requires a pose source",
             },
         }
 
@@ -105,6 +115,50 @@ class QtBot:
         ok = self._client.wait_for_ack(prefix)
         return {"ok": ok, "command": command}
 
+    # ---- navigation (Phase 2) ---------------------------------------------
+
+    def attach_navigator(self, pose_source: Any) -> dict[str, Any]:
+        """Wire a pose source (e.g. brain.perception.localize.Localizer) so the
+        QtBot can offer closed-loop go_to/patrol commands."""
+        from brain.navigation import Navigator  # optional dep
+        self._navigator = Navigator(
+            robot=self,
+            pose_source=pose_source,
+            telemetry_reader=self._client.read_telemetry,
+            keepalive=self._client.ping,
+        ).start()
+        return {"ok": True, "command": "attach_navigator"}
+
+    def detach_navigator(self) -> dict[str, Any]:
+        if self._navigator is not None:
+            self._navigator.stop()
+            self._navigator = None
+        return {"ok": True, "command": "detach_navigator"}
+
+    def go_to(self, x_cm: float, y_cm: float,
+              tolerance_cm: float | None = None,
+              timeout_s: float = 60.0) -> dict[str, Any]:
+        if self._navigator is None:
+            return {"ok": False, "error": "no navigator; call attach_navigator first"}
+        return self._navigator.go_to(x_cm, y_cm,
+                                     tolerance_cm=tolerance_cm,
+                                     timeout_s=timeout_s)
+
+    def patrol(self, waypoints: Iterable[tuple[float, float]],
+               repeat: bool = True,
+               tolerance_cm: float | None = None,
+               timeout_s_per_wp: float = 60.0) -> dict[str, Any]:
+        if self._navigator is None:
+            return {"ok": False, "error": "no navigator; call attach_navigator first"}
+        return self._navigator.patrol(waypoints, repeat=repeat,
+                                      tolerance_cm=tolerance_cm,
+                                      timeout_s_per_wp=timeout_s_per_wp)
+
+    def stop_navigation(self) -> dict[str, Any]:
+        if self._navigator is None:
+            return {"ok": True, "reason": "no navigator"}
+        return self._navigator.stop_navigation()
+
     # ---- feedback ----------------------------------------------------------
 
     def status(self) -> dict[str, Any]:
@@ -115,7 +169,15 @@ class QtBot:
         except TimeoutError:
             return {"online": False}
         self._last = t
-        return self._snapshot(t)
+        snap = self._snapshot(t)
+        if self._navigator is not None:
+            try:
+                pose = self._navigator.pose_source.latest()
+                if pose is not None:
+                    snap["pose"] = pose.to_dict()
+            except Exception:
+                pass
+        return snap
 
     def poll_events(self, seconds: float = 1.0) -> list[dict[str, Any]]:
         """Consume telemetry for `seconds` and return state-change events.

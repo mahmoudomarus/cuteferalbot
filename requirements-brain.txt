@@ -1,0 +1,29 @@
+# Optional brain-layer dependencies. The base robot installs lean from
+# requirements.txt; install this file when you want perception / language /
+# voice on top.
+
+# Localization + navigation (Phase 1-2)
+opencv-contrib-python>=4.8
+numpy<2
+
+# Vision (Phase 3) - YOLO via PyTorch (Apple MPS works out of the box)
+ultralytics>=8.2
+
+# Voice (Phase 5) - mic capture
+sounddevice>=0.4
+
+# Pick ONE STT backend (auto-detected at runtime):
+#   pip install parakeet-mlx       # Apple Silicon, Neural Engine, fastest
+#   pip install faster-whisper     # cross-platform fallback
+
+# Optional VLM for open-ended scene questions (mlx is Apple Silicon only):
+#   pip install mlx-vlm
+
+# LLM agent uses OpenAI's Chat Completions API directly via stdlib HTTP -
+# no Python SDK required. Set your key once:
+#   export OPENAI_API_KEY=sk-...
+# Override defaults with env vars (any of these names work):
+#   export OPENAI_MODEL=gpt-4o-mini
+#   export OPENAI_BASE_URL=https://api.openai.com/v1
+# To run against a local/self-hosted model server (Ollama, vLLM, OpenRouter,
+# Azure OpenAI, etc.), point the same OPENAI_BASE_URL at it.
